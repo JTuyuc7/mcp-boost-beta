@@ -154,7 +154,7 @@ export function analyzeImports(
 ): ImportsAnalysis {
     const aliases = loadTsconfigAliases(root);
 
-    let sourceContent = "";
+    let sourceContent: string = "";
     try {
         sourceContent = fs.readFileSync(sourceFile, "utf-8");
     } catch {
