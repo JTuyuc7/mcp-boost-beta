@@ -297,7 +297,7 @@ export function registerPlan(server: McpServer): void {
                 // Auto-detect via git diff
                 let allChanged: string[];
                 try {
-                    allChanged = getChangedFilePaths(root, args.base);
+                    allChanged = await getChangedFilePaths(root, args.base);
                 } catch (err: unknown) {
                     const msg = err instanceof Error ? err.message : String(err);
                     return {

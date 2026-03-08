@@ -1,9 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveRootPath, rootPathErrorResponse } from "../helpers/repo.js";
+
+const execAsync = promisify(exec);
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -70,23 +73,24 @@ function toRelative(root: string, files: string[]): string[] {
 }
 
 /**
- * Runs a coverage shell command, capturing stdout+stderr.
+ * Runs a coverage shell command asynchronously, capturing stdout+stderr.
  * Returns structured output regardless of exit code so callers
  * can decide how to handle test failures vs infrastructure errors.
+ * Uses execAsync (promisified exec) to avoid blocking the event loop.
  */
-function execCoverage(cmd: string, root: string): {
+async function execCoverage(cmd: string, root: string): Promise<{
     output: string;
     success: boolean;
     errorMsg?: string | undefined;
-} {
+}> {
     try {
-        const output = execSync(cmd, {
+        const { stdout, stderr } = await execAsync(cmd, {
             cwd: root,
             encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
             timeout: 180_000,
+            maxBuffer: 10 * 1024 * 1024, // 10 MB
         });
-        return { output, success: true };
+        return { output: stdout + (stderr ? "\n" + stderr : ""), success: true };
     } catch (err: unknown) {
         const e = err as { stdout?: string; stderr?: string; message?: string };
         return {
@@ -158,11 +162,11 @@ function aggregateMetrics(list: FileCoverageMetrics[]): FileCoverageMetrics {
     return agg;
 }
 
-function runJestCoverage(
+async function runJestCoverage(
     root: string,
     relFiles: string[],
     testPathPattern?: string
-): CoverageResult {
+): Promise<CoverageResult> {
     const collectFrom = relFiles.map((f) => `"${f}"`).join(",");
     const pattern = testPathPattern ? `--testPathPattern="${testPathPattern}"` : "";
 
@@ -180,7 +184,7 @@ function runJestCoverage(
 
     console.error("[run_coverage] jest cmd:", cmd);
 
-    const { output, success, errorMsg } = execCoverage(cmd, root);
+    const { output, success, errorMsg } = await execCoverage(cmd, root);
     const jsonMetrics = readCoverageSummaryJson(root, relFiles);
 
     return {
@@ -195,11 +199,11 @@ function runJestCoverage(
     };
 }
 
-function runVitestCoverage(
+async function runVitestCoverage(
     root: string,
     relFiles: string[],
     testPathPattern?: string
-): CoverageResult {
+): Promise<CoverageResult> {
     const pattern = testPathPattern ? testPathPattern : "";
 
     const cmd = [
@@ -214,7 +218,7 @@ function runVitestCoverage(
 
     console.error("[run_coverage] vitest cmd:", cmd);
 
-    const { output, success, errorMsg } = execCoverage(cmd, root);
+    const { output, success, errorMsg } = await execCoverage(cmd, root);
 
     // vitest también puede generar coverage-summary.json con el reporter json-summary
     const jsonMetrics = readCoverageSummaryJson(root, relFiles);
@@ -287,10 +291,11 @@ export function registerRunCoverage(server: McpServer) {
             const root = resolved.root;
             const relFiles = toRelative(root, args.files);
 
-            const result =
+            const result = await (
                 args.testRunner === "vitest"
                     ? runVitestCoverage(root, relFiles, args.testPathPattern)
-                    : runJestCoverage(root, relFiles, args.testPathPattern);
+                    : runJestCoverage(root, relFiles, args.testPathPattern)
+            );
 
             return {
                 content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

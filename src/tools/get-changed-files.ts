@@ -1,8 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import { resolveRootPath, rootPathErrorResponse, SOURCE_EXTENSIONS, isTestFile } from "../helpers/repo.js";
+
+const execAsync = promisify(exec);
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -34,28 +37,42 @@ const GetChangedFilesSchema = z.object({
 // Helper
 // ---------------------------------------------------------------------------
 
-function runGit(cmd: string, cwd: string): string {
+/**
+ * Runs a git command asynchronously. Throws on non-zero exit.
+ */
+async function runGit(cmd: string, cwd: string): Promise<string> {
     try {
-        return execSync(cmd, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+        const { stdout } = await execAsync(cmd, {
+            cwd,
+            encoding: "utf-8",
+            timeout: 30_000,
+        });
+        return stdout.trim();
     } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
+        const e = err as { stdout?: string; stderr?: string; message?: string };
+        const message = e.message ?? String(err);
         throw new Error(`git command failed: ${cmd}\n${message}`);
     }
 }
 
-export function getChangedFilePaths(root: string, base?: string): string[] {
+/**
+ * Returns absolute paths of changed files.
+ * When no `base` is given, runs staged/unstaged/untracked queries in parallel
+ * to avoid blocking the event loop sequentially.
+ */
+export async function getChangedFilePaths(root: string, base?: string): Promise<string[]> {
     let output: string;
 
     if (base) {
         // Diff contra una branch/commit específico (ideal para PRs / tickets)
-        output = runGit(`git diff --name-only --diff-filter=ACMRT ${base}`, root);
+        output = await runGit(`git diff --name-only --diff-filter=ACMRT ${base}`, root);
     } else {
-        // Staged
-        const staged = runGit("git diff --name-only --diff-filter=ACMRT --cached", root);
-        // Unstaged
-        const unstaged = runGit("git diff --name-only --diff-filter=ACMRT", root);
-        // Untracked (nuevos archivos sin git add)
-        const untracked = runGit("git ls-files --others --exclude-standard", root);
+        // Run staged, unstaged and untracked queries in parallel
+        const [staged, unstaged, untracked] = await Promise.all([
+            runGit("git diff --name-only --diff-filter=ACMRT --cached", root),
+            runGit("git diff --name-only --diff-filter=ACMRT", root),
+            runGit("git ls-files --others --exclude-standard", root),
+        ]);
 
         output = [staged, unstaged, untracked].filter(Boolean).join("\n");
     }
@@ -89,7 +106,7 @@ export function registerGetChangedFiles(server: McpServer) {
 
             const root = resolved.root;
 
-            const allChanged = getChangedFilePaths(root, args.base);
+            const allChanged = await getChangedFilePaths(root, args.base);
 
             // Filtrar: solo extensiones de código fuente
             const sourceFiles = allChanged.filter((f) => {

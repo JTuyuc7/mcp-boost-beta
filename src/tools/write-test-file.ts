@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 import { isTestFile, SOURCE_EXTENSIONS, resolveRootPath, rootPathErrorResponse } from "../helpers/repo.js";
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -62,12 +64,13 @@ interface ValidationResult {
  *
  * Estrategia: escribe el archivo en su destino final pero lo borra si falla.
  * Así tsc puede resolver imports relativos correctamente con el tsconfig del proyecto.
+ * Usa execFileAsync para no bloquear el event loop durante la validación.
  */
-function validateWithTsc(
+async function validateWithTsc(
     content: string,
     targetPath: string,
     root: string
-): ValidationResult {
+): Promise<ValidationResult> {
     const hasTsConfig =
         fs.existsSync(path.join(root, "tsconfig.json")) ||
         fs.existsSync(path.join(root, "tsconfig.base.json"));
@@ -88,10 +91,9 @@ function validateWithTsc(
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(tmpPath, content, "utf-8");
 
-        execSync(`npx tsc --noEmit --skipLibCheck "${tmpPath}"`, {
+        await execFileAsync("npx", ["tsc", "--noEmit", "--skipLibCheck", tmpPath], {
             cwd: root,
             encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
             timeout: 30_000,
         });
 
@@ -237,7 +239,7 @@ export function registerWriteTestFile(server: McpServer) {
 
             // --- TypeScript validation (before writing) ---
             if (args.validate !== false) {
-                const validation = validateWithTsc(args.content, resolvedPath, root);
+                const validation = await validateWithTsc(args.content, resolvedPath, root);
                 if (!validation.passed) {
                     return {
                         content: [
