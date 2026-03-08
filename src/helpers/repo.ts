@@ -1,6 +1,36 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// ---------------------------------------------------------------------------
+// In-memory cache for package.json and tsconfig.json
+// ---------------------------------------------------------------------------
+
+interface CacheEntry<T> {
+    data: T;
+    timestamp: number;
+}
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+const packageJsonCache = new Map<string, CacheEntry<Record<string, unknown> | null>>();
+const tsconfigCache = new Map<string, CacheEntry<Record<string, unknown> | null>>();
+
+/**
+ * Invalidates all caches. Useful for testing or when you know files have changed.
+ */
+export function invalidateCache(): void {
+    packageJsonCache.clear();
+    tsconfigCache.clear();
+}
+
+/**
+ * Invalidates cache for a specific root path.
+ */
+export function invalidateCacheForRoot(root: string): void {
+    packageJsonCache.delete(root);
+    tsconfigCache.delete(root);
+}
+
 /**
  * Resultado de resolver el rootPath.
  *
@@ -112,15 +142,75 @@ export function findRepoRoot(startDir: string): string {
 
 /**
  * Lee y parsea el package.json en `root`. Devuelve null si no existe o hay error.
+ * Utiliza caché en memoria con TTL de 5 minutos para mejorar performance.
  */
 export function readPackageJson(root: string): Record<string, unknown> | null {
+    const now = Date.now();
+    const cached = packageJsonCache.get(root);
+
+    if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
+        // Cache hit
+        return cached.data;
+    }
+
+    // Cache miss - read from disk
     const pkgPath = path.join(root, "package.json");
-    if (!fs.existsSync(pkgPath)) return null;
-    try {
-        return JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    } catch {
+    if (!fs.existsSync(pkgPath)) {
+        packageJsonCache.set(root, { data: null, timestamp: now });
         return null;
     }
+
+    try {
+        const data = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+        packageJsonCache.set(root, { data, timestamp: now });
+        return data;
+    } catch {
+        packageJsonCache.set(root, { data: null, timestamp: now });
+        return null;
+    }
+}
+
+/**
+ * Lee y parsea el primer tsconfig encontrado en `root` (tsconfig.json, tsconfig.base.json, etc.).
+ * Devuelve null si no existe o hay error. Utiliza caché en memoria con TTL de 5 minutos.
+ * Elimina comentarios antes de parsear.
+ */
+export function readTsconfigJson(root: string): Record<string, unknown> | null {
+    const now = Date.now();
+    const cacheKey = root;
+    const cached = tsconfigCache.get(cacheKey);
+
+    if (cached && (now - cached.timestamp) < CACHE_TTL_MS) {
+        // Cache hit
+        return cached.data;
+    }
+
+    // Cache miss - try multiple tsconfig locations
+    const candidates = [
+        path.join(root, "tsconfig.json"),
+        path.join(root, "tsconfig.base.json"),
+        path.join(root, "tsconfig.app.json"),
+    ];
+
+    for (const candidate of candidates) {
+        if (!fs.existsSync(candidate)) continue;
+        try {
+            // tsconfig puede tener comentarios, hacemos un parse tolerante
+            const raw = fs.readFileSync(candidate, "utf-8")
+                .replace(/\/\/[^\n]*/g, "")      // strip // comments
+                .replace(/\/\*[\s\S]*?\*\//g, ""); // strip /* */ comments
+            const data = JSON.parse(raw);
+            tsconfigCache.set(cacheKey, { data, timestamp: now });
+            return data;
+        } catch {
+            // tsconfig malformado — probar siguiente
+            continue;
+        }
+    }
+
+    // No se encontró ningún tsconfig válido
+    tsconfigCache.set(cacheKey, { data: null, timestamp: now });
+    return null;
 }
 
 /** Extensiones de código fuente permitidas */

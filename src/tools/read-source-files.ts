@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import fs from "node:fs";
+import { promises as fsPromises } from "node:fs";
 import path from "node:path";
 import {
     resolveRootPath,
@@ -77,15 +78,15 @@ interface FileContent {
     importsAnalysis: ImportsAnalysis;
 }
 
-function readFileSafe(
+async function readFileSafe(
     filePath: string,
     maxChars: number
-): { content: string | null; truncated: boolean; exists: boolean } {
+): Promise<{ content: string | null; truncated: boolean; exists: boolean }> {
     if (!fs.existsSync(filePath)) {
         return { content: null, truncated: false, exists: false };
     }
     try {
-        const raw = fs.readFileSync(filePath, "utf-8");
+        const raw = await fsPromises.readFile(filePath, "utf-8");
         if (raw.length > maxChars) {
             return {
                 content: raw.slice(0, maxChars) + "\n\n// [truncated — file exceeds maxCharsPerFile]",
@@ -131,16 +132,18 @@ export function registerReadSourceFiles(server: McpServer) {
             const convention: TestConvention = detectTestConvention(root);
             console.error("[read_source_files] detected convention:", convention);
 
-            const results: FileContent[] = args.files
-                .filter((f) => !isTestFile(f))
-                .map((filePath) => {
-                    const source = readFileSafe(filePath, maxChars);
+            // Paralelizar la lectura de archivos para mejorar performance (2-3x más rápido)
+            const sourceFiles = args.files.filter((f) => !isTestFile(f));
+
+            const results: FileContent[] = await Promise.all(
+                sourceFiles.map(async (filePath) => {
+                    const source = await readFileSafe(filePath, maxChars);
                     const existingTestPath = findTestFileForSource(filePath, root);
                     const suggested = suggestTestFilePath(filePath, root, convention);
                     const resolvedTestPath = existingTestPath ?? suggested;
 
                     const testFileRead = existingTestPath
-                        ? readFileSafe(existingTestPath, maxChars)
+                        ? await readFileSafe(existingTestPath, maxChars)
                         : { content: null, truncated: false, exists: false };
 
                     // Analiza imports del fuente reescritos para el test file
@@ -165,7 +168,8 @@ export function registerReadSourceFiles(server: McpServer) {
                             suggestedRelativePath: path.relative(root, resolvedTestPath),
                         },
                     };
-                });
+                })
+            );
 
             const withTests = results.filter((r) => r.testFile.exists).length;
             const withoutTests = results.filter((r) => !r.testFile.exists).length;

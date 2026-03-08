@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { readTsconfigJson } from "./repo.js";
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -119,39 +120,23 @@ interface PathAliases {
 }
 
 function loadTsconfigAliases(root: string): PathAliases {
-    const candidates = [
-        path.join(root, "tsconfig.json"),
-        path.join(root, "tsconfig.base.json"),
-        path.join(root, "tsconfig.app.json"),
-    ];
+    const config = readTsconfigJson(root);
+    if (!config) return {};
 
-    for (const candidate of candidates) {
-        if (!fs.existsSync(candidate)) continue;
-        try {
-            // tsconfig puede tener comentarios, hacemos un parse tolerante
-            const raw = fs.readFileSync(candidate, "utf-8")
-                .replace(/\/\/[^\n]*/g, "")      // strip // comments
-                .replace(/\/\*[\s\S]*?\*\//g, ""); // strip /* */ comments
-            const config = JSON.parse(raw);
-            const compilerPaths: Record<string, string[]> = config?.compilerOptions?.paths ?? {};
-            const baseUrl: string = config?.compilerOptions?.baseUrl ?? ".";
-            const aliases: PathAliases = {};
+    const compilerOptions = config?.compilerOptions as { paths?: Record<string, string[]>; baseUrl?: string } | undefined;
+    const compilerPaths: Record<string, string[]> = compilerOptions?.paths ?? {};
+    const baseUrl: string = compilerOptions?.baseUrl ?? ".";
+    const aliases: PathAliases = {};
 
-            for (const [alias, targets] of Object.entries(compilerPaths)) {
-                if (targets.length === 0) continue;
-                // "@/*" → "src/*"  convierte el glob a prefix
-                const aliasPrefix = alias.replace(/\/\*$/, "");
-            const targetPrefix = path.resolve(root, baseUrl, (targets[0] ?? "").replace(/\/\*$/, ""));
-                aliases[aliasPrefix] = targetPrefix;
-            }
-
-            return aliases;
-        } catch {
-            // tsconfig malformado — ignorar
-        }
+    for (const [alias, targets] of Object.entries(compilerPaths)) {
+        if (targets.length === 0) continue;
+        // "@/*" → "src/*"  convierte el glob a prefix
+        const aliasPrefix = alias.replace(/\/\*$/, "");
+        const targetPrefix = path.resolve(root, baseUrl, (targets[0] ?? "").replace(/\/\*$/, ""));
+        aliases[aliasPrefix] = targetPrefix;
     }
 
-    return {};
+    return aliases;
 }
 
 // ---------------------------------------------------------------------------
